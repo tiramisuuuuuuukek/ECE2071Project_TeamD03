@@ -40,10 +40,68 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-UART_HandleTypeDef huart1;
+SPI_HandleTypeDef hspi1;
+
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim7;
+TIM_HandleTypeDef htim16;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+
+// *** Task 3 variables for Audio improving initialisation (start) *** //
+// Task 3 filter settings
+#define OUTLIER_THRESHOLD 560		// best setting
+
+// 16-bit SPI frame received from Sampling STM
+uint16_t raw_adc_val = 0;
+
+// Simple outlier rejection + moving average variables
+uint16_t prev_sample = 2048;     // start near midpoint for 12-bit ADC (save 1st value for Moving Average filter of 3)
+uint16_t prev_sample2 = 2048;	// save 2nd value for Moving Average filter of 3
+uint16_t filtered_sample = 2048;		// initial value near midpoint instead of 0 is better for average
+
+
+// Downsampling by 2
+uint8_t sample_toggle = 0;
+uint16_t downsam_sum = 0;
+uint8_t downsam_count = 0;
+
+// UART output byte
+uint8_t output_val = 0;
+
+// *** Task 3 variables for Audio  improving initialisation (end) *** //
+
+// *** task 4 variable to improve throughput of uart transmission (start) *** //
+uint8_t pack_have_first = 0;
+uint16_t pack_first_sample = 2048;
+
+# define UART_TX_BUFFER_SIZE 8192		// must be a power of 2
+volatile uint8_t uart_tx_buffer[UART_TX_BUFFER_SIZE];
+volatile uint16_t uart_tx_head = 0;
+volatile uint16_t uart_tx_tail = 0;
+volatile uint32_t uart_tx_overflow = 0;
+// *** task 4 variable to improve throughput of uart transmission (start) *** //
+
+// ------------------------------------------------------- /
+
+// *** User Interface and Modes (start) *** //
+#define MODE_IDLE 'I'			// new mode added because recording audio would prematurely start
+#define MODE_MANUAL 'M'
+#define MODE_DISTANCE 'D'
+uint8_t mode = MODE_IDLE;		// default mode is idle
+uint8_t mode_distance = 0;		// enabled = 1 ; disabled = 0
+uint8_t recording_enabler = 0;	// enabled = 1 ; disabled = 0
+float min_distance_cm = 10;
+volatile float distance = 6767;	// include volatile since the variable's value may change unexpectedly at any time
+uint32_t count1 = 0;
+uint32_t count2 = 0;
+uint8_t flag = 0;
+uint8_t rx_cmd = 0;
+volatile uint8_t distance_valid = 0;
+
+// *** User Interface and Modes (end) *** //
 
 /* USER CODE END PV */
 
@@ -51,9 +109,20 @@ UART_HandleTypeDef huart2;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_USART1_UART_Init(void);
+static void MX_SPI1_Init(void);
+static void MX_TIM16_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_TIM7_Init(void);
 /* USER CODE BEGIN PFP */
+static void transmit_12bit_audio(uint8_t uart_output);
+void delay_uS(uint16_t delay);
+void ultrasonic_trig();
+static void handle_uart_command(void);
 
+static void reset_audio_filter_state(void);
+static void uart_tx_push_byte(uint8_t byte);
+static void uart_tx_push_3bytes(uint8_t b0, uint8_t b1, uint8_t b2);
+static void uart_tx_clear_buffer(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -91,37 +160,42 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
-  MX_USART1_UART_Init();
+  MX_SPI1_Init();
+  MX_TIM16_Init();
+  MX_TIM1_Init();
+  MX_TIM7_Init();
   /* USER CODE BEGIN 2 */
+//  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+  HAL_TIM_Base_Start(&htim16);					// timer for counting us delay (note: place base_start above IT)
+  __HAL_SPI_ENABLE(&hspi1);						// audio SPI receive pollign
+
+  HAL_NVIC_SetPriority(USART2_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(USART2_IRQn);
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-//moving average filter of length 2.
-  uint8_t x0 = 0;
-  uint8_t x1 = 0;
-  uint8_t y;
-
   while (1)
   {
     /* USER CODE END WHILE */
 
-	  HAL_UART_Receive(&huart1, &x1, 1, HAL_MAX_DELAY);
-
-	      // moving average (order 2)
-	      y = (x0 + x1) / 2;
-
-	      x0 = x1;  // shift register
-
-	      HAL_UART_Transmit(&huart2, &y, 1, HAL_MAX_DELAY);
-
-
-
-
-
-
     /* USER CODE BEGIN 3 */
+	  static uint32_t last_cmd_check = 0; 		// variable to save the last time
+
+	  if (mode == MODE_MANUAL)
+	  {
+		  recording_enabler = 1;		// transmit
+		  // instead of letting handle_uart_command() run continuously, we make it run every 50ms to reduce the
+		  if (HAL_GetTick() - last_cmd_check >= 10)
+		  {
+			  last_cmd_check = HAL_GetTick();
+			  handle_uart_command();
+		  }
+	  } else{
+		  handle_uart_command();
+	  }
+	  transmit_12bit_audio(recording_enabler);		// transmit when enabled
   }
   /* USER CODE END 3 */
 }
@@ -187,37 +261,161 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief USART1 Initialization Function
+  * @brief SPI1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_USART1_UART_Init(void)
+static void MX_SPI1_Init(void)
 {
 
-  /* USER CODE BEGIN USART1_Init 0 */
+  /* USER CODE BEGIN SPI1_Init 0 */
 
-  /* USER CODE END USART1_Init 0 */
+  /* USER CODE END SPI1_Init 0 */
 
-  /* USER CODE BEGIN USART1_Init 1 */
+  /* USER CODE BEGIN SPI1_Init 1 */
 
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_SLAVE;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES_RXONLY;
+  hspi1.Init.DataSize = SPI_DATASIZE_16BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 7;
+  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART1_Init 2 */
+  /* USER CODE BEGIN SPI1_Init 2 */
 
-  /* USER CODE END USART1_Init 2 */
+  /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 31;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 65535;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim1, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
+  * @brief TIM7 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM7_Init(void)
+{
+
+  /* USER CODE BEGIN TIM7_Init 0 */
+
+  /* USER CODE END TIM7_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM7_Init 1 */
+
+  /* USER CODE END TIM7_Init 1 */
+  htim7.Instance = TIM7;
+  htim7.Init.Prescaler = 32000-1;
+  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim7.Init.Period = 100-1;
+  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM7_Init 2 */
+
+  /* USER CODE END TIM7_Init 2 */
+
+}
+
+/**
+  * @brief TIM16 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM16_Init(void)
+{
+
+  /* USER CODE BEGIN TIM16_Init 0 */
+
+  /* USER CODE END TIM16_Init 0 */
+
+  /* USER CODE BEGIN TIM16_Init 1 */
+
+  /* USER CODE END TIM16_Init 1 */
+  htim16.Instance = TIM16;
+  htim16.Init.Prescaler = 31;
+  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim16.Init.Period = 65535;
+  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim16.Init.RepetitionCounter = 0;
+  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM16_Init 2 */
+
+  /* USER CODE END TIM16_Init 2 */
 
 }
 
@@ -237,7 +435,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 921600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -274,7 +472,17 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(Trigger_GPIO_Port, Trigger_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : Trigger_Pin */
+  GPIO_InitStruct.Pin = Trigger_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(Trigger_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LD3_Pin */
   GPIO_InitStruct.Pin = LD3_Pin;
@@ -289,6 +497,354 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void delay_uS(uint16_t delay)
+{
+	// function to delay in microseconds
+    __HAL_TIM_SET_COUNTER(&htim16 , 0);
+    while (__HAL_TIM_GET_COUNTER(&htim16) < delay)
+    {
+    	// wait until delay fully clears
+    }
+}
+
+void ultrasonic_trig()
+{
+	// function to trigger ultrasonic sequence of Reset -> set -> reset
+	HAL_GPIO_WritePin(Trigger_GPIO_Port,Trigger_Pin, GPIO_PIN_RESET);
+	delay_uS(2);
+    HAL_GPIO_WritePin(Trigger_GPIO_Port,Trigger_Pin, GPIO_PIN_SET);
+    delay_uS(10);
+    HAL_GPIO_WritePin(Trigger_GPIO_Port,Trigger_Pin, GPIO_PIN_RESET);
+}
+
+static void reset_audio_filter_state(void)
+{
+	// Simple function to reset variable values after switching between modes (flushes old data out when doing new recording)
+    prev_sample = 2048;			// note midpoint of 12-bit is 2048
+    prev_sample2 = 2048;
+    filtered_sample = 2048;
+    sample_toggle = 0;
+    output_val = 0;
+    downsam_sum = 0;
+    downsam_count = 0;
+    pack_have_first = 0;
+    pack_first_sample = 2048;
+}
+
+static void handle_uart_command(void)
+{
+	// This function is used to read commands from Python.
+	// It switches between modes such as IDLE , MANUAL , DISTANCE
+	// it should read values of 'I' , 'D' , 'M' and the distance threshold sent
+    static uint8_t reading_distance = 0;		// used for 'D', 1 = start reading digit , 0 = idle
+    static uint16_t pending_distance = 0;		// 1 = start reading digit , 0 = idle
+    // e.g if 10 is typed on CMD -> 1 is transmitted then only 0 is transmitted, so it has to save the first byte (1) then append 0 to the back to get 10
+
+    // USART overrunn can occur. clear it so command receive can recover
+    if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_ORE) != RESET)
+    {
+    	__HAL_UART_CLEAR_OREFLAG(&huart2);
+    }
+
+    // reads 1 byte at a time from USART2; 0 means non-blocking -> no byte available. immediately exits to prevent bottlenecking transmissionr ate
+    while (HAL_UART_Receive(&huart2, &rx_cmd, 1, 0) == HAL_OK)
+    {
+    	// if mode is in IDLE mode
+        if (rx_cmd == 'I')
+        {
+        	uart_tx_clear_buffer();		// removes old bytes stored from the STM-side buffer
+        	// IDLE mode must ensure audio is NOT being sent to Python
+        	// keep spi audio draining in the background
+            mode = MODE_IDLE;
+            mode_distance = 0;			// Disable distance mode
+            recording_enabler = 0;		// stop audio being transmitted
+
+            reset_audio_filter_state();		// reset memory
+
+        	// Reset old distance readings
+            reading_distance = 0;
+            pending_distance = 0;
+
+            // stop ultrasonic timers
+            HAL_TIM_Base_Stop_IT(&htim7);
+            HAL_TIM_IC_Stop_IT(&htim1, TIM_CHANNEL_1);
+
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
+                                           TIM_CHANNEL_1,
+                                           TIM_INPUTCHANNELPOLARITY_RISING);
+            flag = 0;
+            distance = 999;			// 999 is used as "Too Far away value"
+            distance_valid = 0;
+        }
+        // IF mode is in Manual mode
+        else if (rx_cmd == 'M')
+        {
+        	uart_tx_clear_buffer();		// removes old bytes stored from the STM-side buffer
+            mode = MODE_MANUAL;
+            // bypass ultrasonic sensor
+            mode_distance = 0;
+            // straight away enable the recording and transmitting
+            recording_enabler = 1;
+            reset_audio_filter_state();
+            reading_distance = 0;
+            pending_distance = 0;
+
+            // stop ultrasonic timers
+            HAL_TIM_Base_Stop_IT(&htim7);
+            HAL_TIM_IC_Stop_IT(&htim1, TIM_CHANNEL_1);
+
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
+                                           TIM_CHANNEL_1,
+                                           TIM_INPUTCHANNELPOLARITY_RISING);
+            flag = 0;
+            distance = 999;
+        }
+        // if mode is in Distance mode
+        else if (rx_cmd == 'D')
+        {
+        	HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET); 		// for debugging
+            /*
+             * Do not immediately start distance mode. This is to prevent premature audio sampling.
+             * Wait until Python sends the distance threshold.
+             */
+        	// temporary idel mode
+        	uart_tx_clear_buffer();
+        	reset_audio_filter_state();
+            mode = MODE_IDLE;
+            mode_distance = 0;
+            recording_enabler = 0;
+
+
+            reading_distance = 1;		// start reading distance number
+            pending_distance = 0;
+
+            HAL_TIM_Base_Stop_IT(&htim7);
+            HAL_TIM_IC_Stop_IT(&htim1, TIM_CHANNEL_1);
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
+                                           TIM_CHANNEL_1,
+                                           TIM_INPUTCHANNELPOLARITY_RISING);
+            flag = 0;
+            distance = 999;
+        }
+        else if (reading_distance)
+        {
+        	// builts the minimum distance sent through python
+            if (rx_cmd >= '0' && rx_cmd <= '9')
+            {
+            	// converts ASCII characters to integer numbers
+                pending_distance = pending_distance * 10 + (rx_cmd - '0');
+            }
+            else if (rx_cmd == '\n' || rx_cmd == '\r')	// when newline is received, the distance number is finished
+            {
+                if (pending_distance > 0 && pending_distance < 400)
+                {
+                    min_distance_cm = pending_distance;
+                }
+                // enables distance mode logic
+                mode = MODE_DISTANCE;
+                mode_distance = 1;
+                recording_enabler = 0;
+
+                flag = 0;
+                distance = 999;
+
+                // reset timers
+                __HAL_TIM_SET_COUNTER(&htim1, 0);
+                __HAL_TIM_SET_COUNTER(&htim7, 0);
+
+                // start ultrasonic timers
+                HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);		// tim1 measures ultrasonic echo pulse
+                HAL_TIM_Base_Start_IT(&htim7);					// tim7 periodically triggers the ultrasonic sensor, instead of always turning it on
+
+                reading_distance = 0;
+                pending_distance = 0;
+            }
+        }
+    }
+}
+
+static void uart_tx_push_byte(uint8_t byte)
+{
+    uint16_t next_head = (uart_tx_head + 1) & (UART_TX_BUFFER_SIZE - 1);
+
+    if (next_head == uart_tx_tail)
+    {
+        // Buffer full. Count overflow and drop byte.
+        uart_tx_overflow++;
+        return;
+    }
+
+    uart_tx_buffer[uart_tx_head] = byte;
+    uart_tx_head = next_head;
+
+    // Enable TXE interrupt so USART starts sending bytes in background.
+    __HAL_UART_ENABLE_IT(&huart2, UART_IT_TXE);
+}
+
+
+static void uart_tx_push_3bytes(uint8_t b0, uint8_t b1, uint8_t b2)
+{
+    uart_tx_push_byte(b0);
+    uart_tx_push_byte(b1);
+    uart_tx_push_byte(b2);
+}
+
+
+static void uart_tx_clear_buffer(void)
+{
+    __HAL_UART_DISABLE_IT(&huart2, UART_IT_TXE);
+
+    uart_tx_head = 0;
+    uart_tx_tail = 0;
+    uart_tx_overflow = 0;
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM7)
+    {
+        if (mode_distance)
+        {
+            if (distance > 1 && distance < min_distance_cm && distance_valid)
+            {
+                recording_enabler = 1;
+                // set Green light ON when minimum distance is reached
+                HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+            }
+            else
+            {
+                recording_enabler = 0;
+                // set Green light OFF when minimum distance is reached
+//                HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+            }
+            distance_valid = 0;
+            // runs every 100 ms, start next ultraspnic measurement at the end
+        	ultrasonic_trig();
+
+        }
+    }
+}
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if ((htim->Instance == TIM1) &&
+        (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) &&
+        (mode_distance == 1))
+    {
+        if (flag == 0)
+        {
+            count1 = HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_1);
+
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
+                                           TIM_CHANNEL_1,
+                                           TIM_INPUTCHANNELPOLARITY_FALLING);
+            flag = 1;
+        }
+        else
+        {
+            count2 = HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_1);
+
+            uint32_t pulse_width;
+
+            if (count2 >= count1)
+            {
+                pulse_width = count2 - count1;
+            }
+            else
+            {
+                pulse_width = (65535 - count1) + count2;
+            }
+
+            distance = pulse_width / 58.0f;
+            distance_valid = 1;
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
+                                           TIM_CHANNEL_1,
+                                           TIM_INPUTCHANNELPOLARITY_RISING);
+            flag = 0;
+        }
+    }
+}
+
+static void transmit_12bit_audio(uint8_t uart_output)
+{
+    // RXNE = Receive buffer not empty.
+    // If no SPI sample has arrived, return immediately, instead of computing
+    if (__HAL_SPI_GET_FLAG(&hspi1, SPI_FLAG_RXNE) == RESET)
+    {
+        return;
+    }
+
+    // Read one 16-bit SPI frame from the SPI data register.
+    // Only the lower 10 bits are useful ADC data.
+    uint16_t raw_sample = (uint16_t)(hspi1.Instance->DR);
+    raw_sample &= 0x0FFF;			// use AND operand to extract the 12 bits out of the 16 bits since adc value is 12-bit
+
+    // Clear overrun if it happened.
+    // This prevents SPI from getting stuck after missed samples.
+    if (__HAL_SPI_GET_FLAG(&hspi1, SPI_FLAG_OVR) != RESET)
+    {
+        __HAL_SPI_CLEAR_OVRFLAG(&hspi1);
+    }
+
+    // Simple outlier rejection:
+    // If the new sample difference between the previous accepted sample is too much to the OUTLIER THRESHOLD we tuned,
+    // limit the jump instead of replacing the value.
+
+    int16_t diff = (int16_t)raw_sample - (int16_t)prev_sample;
+
+    if (diff > OUTLIER_THRESHOLD)
+    {
+        raw_sample = prev_sample + OUTLIER_THRESHOLD;
+    } else if (diff < -OUTLIER_THRESHOLD)
+    {
+    	raw_sample = prev_sample - OUTLIER_THRESHOLD;
+    }
+
+    //Optimised moving average filter of length 3:
+    // average current accepted sample with previous two accepted sample.
+    filtered_sample = (raw_sample + prev_sample + prev_sample2)/3;
+
+    // shife sample history for next incoming sample
+    prev_sample2 = prev_sample;
+    prev_sample = raw_sample;
+
+    // Sampling STM sends about 44.1 ksps. For Processing SMT to send also 44.1ksps
+    // so no more downsampling code
+
+    if (uart_output)
+    {
+    	// Send the 12bit adc value in 2 bytes, little-endian:
+    	//  byte 0 = lower 8 bits
+    	// byte 1 = upper 4 bits
+    	uint16_t sample12 = filtered_sample & 0x0FFF;
+
+    	if (!pack_have_first)
+    	{
+    		// store first 12-bit sample then wait for second sample before transmitting
+    		pack_first_sample = sample12;
+    		pack_have_first = 1;
+    	} else{
+    		// pack together 2 12 bit samples into three bytes
+    		uint16_t sample_A =pack_first_sample & 0x0FFF;
+    		uint16_t sample_B = sample12 & 0x0FFF;
+
+        	uint8_t tx_buffer[3];
+        	// have to store in 3 different bytes then transmit
+        	tx_buffer[0] = sample_A & 0xFF;				// store the the bits [7:0] of 12-bit Sample A
+        	// obtain the bits [11:8] of 12 bit A then shift to the right then OR with bits [3:0] of 12 bit B that is shifted to the left to combine both
+        	tx_buffer[1] = ((sample_A >> 8) & 0x0F) | ((sample_B & 0x0F) <<4);
+        	tx_buffer[2] = ((sample_B >> 4) & 0xFF);	// store the bits of [11:8] of 12 bit Sample B
+
+        	uart_tx_push_3bytes(tx_buffer[0],tx_buffer[1], tx_buffer[2]);
+
+        	pack_have_first = 0;
+    	}
+    }else{
+    	// if not transmitting then clear the pack state so old samples are not reused when recording statrs again
+    	pack_have_first = 0;
+    }
+}
 
 /* USER CODE END 4 */
 

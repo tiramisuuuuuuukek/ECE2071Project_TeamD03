@@ -31,7 +31,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define UART_TX_BUFFER_SIZE 8192
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -55,9 +55,14 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-
+extern SPI_HandleTypeDef hspi1;
+extern TIM_HandleTypeDef htim1;
+extern TIM_HandleTypeDef htim7;
 /* USER CODE BEGIN EV */
-
+extern UART_HandleTypeDef huart2;
+extern volatile uint8_t uart_tx_buffer[];
+extern volatile uint16_t uart_tx_head;
+extern volatile uint16_t uart_tx_tail;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -198,6 +203,67 @@ void SysTick_Handler(void)
 /* please refer to the startup file (startup_stm32l4xx.s).                    */
 /******************************************************************************/
 
-/* USER CODE BEGIN 1 */
+/**
+  * @brief This function handles TIM1 capture compare interrupt.
+  */
+void TIM1_CC_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_CC_IRQn 0 */
 
+  /* USER CODE END TIM1_CC_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  /* USER CODE BEGIN TIM1_CC_IRQn 1 */
+
+  /* USER CODE END TIM1_CC_IRQn 1 */
+}
+
+/**
+  * @brief This function handles SPI1 global interrupt.
+  */
+void SPI1_IRQHandler(void)
+{
+  /* USER CODE BEGIN SPI1_IRQn 0 */
+
+  /* USER CODE END SPI1_IRQn 0 */
+  HAL_SPI_IRQHandler(&hspi1);
+  /* USER CODE BEGIN SPI1_IRQn 1 */
+
+  /* USER CODE END SPI1_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM7 global interrupt.
+  */
+void TIM7_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM7_IRQn 0 */
+
+  /* USER CODE END TIM7_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim7);
+  /* USER CODE BEGIN TIM7_IRQn 1 */
+
+  /* USER CODE END TIM7_IRQn 1 */
+}
+
+/* USER CODE BEGIN 1 */
+void USART2_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART2_IRQn 0 */
+
+  if ((__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TXE) != RESET) &&
+      (__HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_TXE) != RESET))
+  {
+      if (uart_tx_tail != uart_tx_head)
+      {
+          huart2.Instance->TDR = uart_tx_buffer[uart_tx_tail];
+          uart_tx_tail = (uart_tx_tail + 1) & (UART_TX_BUFFER_SIZE - 1);
+      }
+      else
+      {
+          __HAL_UART_DISABLE_IT(&huart2, UART_IT_TXE);
+      }
+  }
+
+  /* USER CODE END USART2_IRQn 0 */
+}
 /* USER CODE END 1 */

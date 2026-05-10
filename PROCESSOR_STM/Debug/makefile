@@ -60,8 +60,8 @@ all: main-build
 main-build: PROCESSOR_STM.elf secondary-outputs
 
 # Tool invocations
-PROCESSOR_STM.elf PROCESSOR_STM.map: $(OBJS) $(USER_OBJS) C:\Users\chong\Downloads\Project_code_config\PROCESSOR_STM\STM32L432KCUX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "PROCESSOR_STM.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\chong\Downloads\Project_code_config\PROCESSOR_STM\STM32L432KCUX_FLASH.ld" --specs=nosys.specs -Wl,-Map="PROCESSOR_STM.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+PROCESSOR_STM.elf PROCESSOR_STM.map: $(OBJS) $(USER_OBJS) C:\Users\Jelly\Downloads\Project_code_config\PROCESSOR_STM\STM32L432KCUX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "PROCESSOR_STM.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\Jelly\Downloads\Project_code_config\PROCESSOR_STM\STM32L432KCUX_FLASH.ld" --specs=nosys.specs -Wl,-Map="PROCESSOR_STM.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

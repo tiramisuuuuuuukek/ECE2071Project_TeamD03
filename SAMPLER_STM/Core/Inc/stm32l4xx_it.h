@@ -60,6 +60,7 @@ void TIM1_BRK_TIM15_IRQHandler(void);
 void TIM1_UP_TIM16_IRQHandler(void);
 void TIM1_TRG_COM_IRQHandler(void);
 void TIM1_CC_IRQHandler(void);
+void SPI1_IRQHandler(void);
 /* USER CODE BEGIN EFP */
 
 /* USER CODE END EFP */

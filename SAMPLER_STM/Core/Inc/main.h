@@ -28,6 +28,17 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32l4xx_hal.h"
+#include "stm32l4xx_ll_spi.h"
+#include "stm32l4xx_ll_bus.h"
+#include "stm32l4xx_ll_cortex.h"
+#include "stm32l4xx_ll_rcc.h"
+#include "stm32l4xx_ll_system.h"
+#include "stm32l4xx_ll_utils.h"
+#include "stm32l4xx_ll_pwr.h"
+#include "stm32l4xx_ll_gpio.h"
+#include "stm32l4xx_ll_dma.h"
+
+#include "stm32l4xx_ll_exti.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -61,10 +72,6 @@ void Error_Handler(void);
 #define MCO_GPIO_Port GPIOA
 #define VCP_TX_Pin GPIO_PIN_2
 #define VCP_TX_GPIO_Port GPIOA
-#define TX_Pin GPIO_PIN_9
-#define TX_GPIO_Port GPIOA
-#define RX_Pin GPIO_PIN_10
-#define RX_GPIO_Port GPIOA
 #define SWDIO_Pin GPIO_PIN_13
 #define SWDIO_GPIO_Port GPIOA
 #define SWCLK_Pin GPIO_PIN_14
