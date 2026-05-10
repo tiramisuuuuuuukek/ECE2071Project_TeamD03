@@ -60,8 +60,8 @@ all: main-build
 main-build: SAMPLER_STM.elf secondary-outputs
 
 # Tool invocations
-SAMPLER_STM.elf SAMPLER_STM.map: $(OBJS) $(USER_OBJS) C:\Users\Jelly\Downloads\Project_code_config\SAMPLER_STM\STM32L432KCUX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "SAMPLER_STM.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\Jelly\Downloads\Project_code_config\SAMPLER_STM\STM32L432KCUX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SAMPLER_STM.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+SAMPLER_STM.elf SAMPLER_STM.map: $(OBJS) $(USER_OBJS) C:\Users\chong\Downloads\Project_code_config\SAMPLER_STM\STM32L432KCUX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "SAMPLER_STM.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\chong\Downloads\Project_code_config\SAMPLER_STM\STM32L432KCUX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SAMPLER_STM.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

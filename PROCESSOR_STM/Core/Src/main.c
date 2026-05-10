@@ -40,36 +40,10 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-SPI_HandleTypeDef hspi1;
-
+UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
-// *** Audio improving initialisation (start) *** //
-// 16-bit SPI frame received from Sampling STM
-uint16_t raw_adc_val = 0;
-
-// Task 3 filter settings
-#define OUTLIER_THRESHOLD 80
-
-// Simple outlier rejection + moving average variables
-uint16_t previous_sample = 512;     // start near midpoint for 10-bit ADC
-uint16_t filtered_sample = 512;
-
-// Downsampling by 2
-uint8_t sample_toggle = 0;
-
-// UART output byte
-uint8_t output_val = 0;
-
-// *** Data improving initialisation (end) *** //
-
-// ------------------------------------------------------- /
-
-// *** User Interface and Modes (start) *** //
-
-// *** User Interface and Modes (end) *** //
 
 /* USER CODE END PV */
 
@@ -77,9 +51,9 @@ uint8_t output_val = 0;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_SPI1_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-static void send_audio_sample(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -117,23 +91,39 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
-  MX_SPI1_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
-  __HAL_SPI_ENABLE(&hspi1);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+//moving average filter of length 2.
+  uint8_t x0 = 0;
+  uint8_t x1 = 0;
+  uint8_t y;
+
   while (1)
   {
     /* USER CODE END WHILE */
 
-    /* USER CODE BEGIN 3 */
-	  send_audio_sample();
+	  HAL_UART_Receive(&huart1, &x1, 1, HAL_MAX_DELAY);
 
-	/* USER CODE END 3 */
+	      // moving average (order 2)
+	      y = (x0 + x1) / 2;
+
+	      x0 = x1;  // shift register
+
+	      HAL_UART_Transmit(&huart2, &y, 1, HAL_MAX_DELAY);
+
+
+
+
+
+
+    /* USER CODE BEGIN 3 */
   }
+  /* USER CODE END 3 */
 }
 
 /**
@@ -197,41 +187,37 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief SPI1 Initialization Function
+  * @brief USART1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_SPI1_Init(void)
+static void MX_USART1_UART_Init(void)
 {
 
-  /* USER CODE BEGIN SPI1_Init 0 */
+  /* USER CODE BEGIN USART1_Init 0 */
 
-  /* USER CODE END SPI1_Init 0 */
+  /* USER CODE END USART1_Init 0 */
 
-  /* USER CODE BEGIN SPI1_Init 1 */
+  /* USER CODE BEGIN USART1_Init 1 */
 
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_SLAVE;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES_RXONLY;
-  hspi1.Init.DataSize = SPI_DATASIZE_16BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 7;
-  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN SPI1_Init 2 */
+  /* USER CODE BEGIN USART1_Init 2 */
 
-  /* USER CODE END SPI1_Init 2 */
+  /* USER CODE END USART1_Init 2 */
 
 }
 
@@ -251,7 +237,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 921600;
+  huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -303,78 +289,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
-static void send_audio_sample(void)
-{
-    /*
-     * RXNE = Receive buffer not empty.
-     * If no SPI sample has arrived, return immediately.
-     */
-    if (__HAL_SPI_GET_FLAG(&hspi1, SPI_FLAG_RXNE) == RESET)
-    {
-        return;
-    }
-
-    /*
-     * Read one 16-bit SPI frame from the SPI data register.
-     * Only the lower 10 bits are useful ADC data.
-     */
-    uint16_t raw_sample = (uint16_t)(hspi1.Instance->DR);
-    raw_sample &= 0x03FF;
-
-    /*
-     * Clear overrun if it happened.
-     * This prevents SPI from getting stuck after missed samples.
-     */
-    if (__HAL_SPI_GET_FLAG(&hspi1, SPI_FLAG_OVR) != RESET)
-    {
-        __HAL_SPI_CLEAR_OVRFLAG(&hspi1);
-    }
-
-    /*
-     * Simple outlier rejection:
-     * If the new sample jumps too far from the previous accepted sample,
-     * replace it with the previous sample.
-     */
-    int16_t delta = (int16_t)raw_sample - (int16_t)previous_sample;
-
-    if ((delta > OUTLIER_THRESHOLD) || (delta < -OUTLIER_THRESHOLD))
-    {
-        raw_sample = previous_sample;
-    }
-
-    /*
-     * Optimised moving average filter of length 2:
-     * average current accepted sample with previous accepted sample.
-     */
-    filtered_sample = (raw_sample + previous_sample) >> 1;
-
-    /*
-     * Store current accepted sample for next comparison/filter.
-     */
-    previous_sample = raw_sample;
-
-    /*
-     * Downsample by 2.
-     * Sampling STM sends ~44.1 ksps.
-     * Processing STM sends every second processed sample → ~22.05 ksps.
-     */
-    sample_toggle = !sample_toggle;
-
-    if (sample_toggle)
-    {
-        /*
-         * Convert 10-bit sample, 0–1023, to 8-bit sample, 0–255.
-         */
-        output_val = (uint8_t)(filtered_sample >> 2);
-
-        /*
-         * Send one byte to Python.
-         * USART2 should be 921600 baud for Task 3 headroom.
-         */
-        HAL_UART_Transmit(&huart2, &output_val, 1, 1);
-    }
-}
 
 /* USER CODE END 4 */
 
