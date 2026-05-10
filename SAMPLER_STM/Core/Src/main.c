@@ -48,7 +48,7 @@ TIM_HandleTypeDef htim1;
 
 // required bit depth of 10 bits per sample
 uint16_t raw_adc_val = 0;
-// SPI is configured to send 8-bit at a time so split adc value into two chunks
+// SPI is configured to send 16-bit at a time so send adc value one shot
 uint16_t TX_data = 0;
 
 /* USER CODE END PV */
@@ -398,23 +398,30 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-// this function is from Week 6 Lab
+// this function is from Week 6 Lab, ensures data is transmitted through SPI
 static void SPI1_WriteTwoBytes(uint16_t tx_data){
-    while (!LL_SPI_IsActiveFlag_TXE(SPI1)) {}
-    LL_SPI_TransmitData16(SPI1, tx_data);
-    while (LL_SPI_IsActiveFlag_BSY(SPI1)) {}
-    LL_SPI_ClearFlag_OVR(SPI1);
+    while (!LL_SPI_IsActiveFlag_TXE(SPI1))
+    {
+    	//wait until SPI1 is ready to accept data //nothing, buffer=0, keeps looping
+    }
+    LL_SPI_TransmitData16(SPI1, tx_data); //has data, buffer=1, transmits data through SPI1
+    while (LL_SPI_IsActiveFlag_BSY(SPI1))
+    {
+    	//when SPI is occupied, keeps looping to wait till transmission ends
+    }
+    LL_SPI_ClearFlag_OVR(SPI1); //clears flag, buffer restores to 0
 }
 
+// gets value from ADC
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
 	if (hadc->Instance == ADC1)
 	{
 		raw_adc_val = HAL_ADC_GetValue(hadc);		// 10-bit value stored in a 16-bit word
 
-		TX_data = raw_adc_val & 0x03FF;				// perform AND operation to essentially copy the 10-bit adc value only
+		TX_data = raw_adc_val & 0x03FF;	//0000001111111111	// perform AND operation to essentially copy the 10-bit adc value only (into 16 bits)
 		// transmit the 10 bit data as a 16-bit over SPI
-		SPI1_WriteTwoBytes(TX_data);
+		SPI1_WriteTwoBytes(TX_data); //transmits 16-bit data to processing stm
 	}
 }
 
