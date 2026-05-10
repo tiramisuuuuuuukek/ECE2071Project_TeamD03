@@ -398,6 +398,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+// this function is from Week 6 Lab
 // this function is from Week 6 Lab, ensures data is transmitted through SPI
 static void SPI1_WriteTwoBytes(uint16_t tx_data){
     while (!LL_SPI_IsActiveFlag_TXE(SPI1))
