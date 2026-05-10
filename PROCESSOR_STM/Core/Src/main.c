@@ -52,17 +52,21 @@ UART_HandleTypeDef huart2;
 
 // *** Task 3 variables for Audio improving initialisation (start) *** //
 // Task 3 filter settings
-#define OUTLIER_THRESHOLD 80
+#define OUTLIER_THRESHOLD 140 //test from 40,60,80,100,120 and 140 gives best output (140= amplitude)
 
 // 16-bit SPI frame received from Sampling STM
 uint16_t raw_adc_val = 0;
 
 // Simple outlier rejection + moving average variables
-uint16_t previous_sample = 512;     // start near midpoint for 10-bit ADC
-uint16_t filtered_sample = 512;
+uint16_t prev_sample = 512;     // start near midpoint for 10-bit ADC (save 1st value for Moving Average filter of 3)
+uint16_t prev_sample2 = 512;	// save 2nd value for Moving Average filter of 3
+uint16_t filtered_sample = 512;		// initial value near midpoint instead of 0 is better for average
+
 
 // Downsampling by 2
 uint8_t sample_toggle = 0;
+uint16_t downsam_sum = 0;
+uint8_t downsam_count = 0;
 
 // UART output byte
 uint8_t output_val = 0;
@@ -72,17 +76,19 @@ uint8_t output_val = 0;
 // ------------------------------------------------------- /
 
 // *** User Interface and Modes (start) *** //
+#define MODE_IDLE 'I'			// new mode added because recording audio would prematurely start
 #define MODE_MANUAL 'M'
 #define MODE_DISTANCE 'D'
-uint8_t mode = MODE_MANUAL;
+uint8_t mode = MODE_IDLE;		// default mode is idle
 uint8_t mode_distance = 0;		// enabled = 1 ; disabled = 0
-uint8_t recording_enabler = 1;	// enabled = 1 ; disabled = 0
-float min_distance_cm = 2;
-float distance = 0;
+uint8_t recording_enabler = 0;	// enabled = 1 ; disabled = 0
+float min_distance_cm = 10;
+volatile float distance = 6767;	// include volatile since the variable's value may change unexpectedly at any time
 uint32_t count1 = 0;
 uint32_t count2 = 0;
 uint8_t flag = 0;
 uint8_t rx_cmd = 0;
+volatile uint8_t distance_valid = 0;
 
 // *** User Interface and Modes (end) *** //
 
@@ -97,10 +103,12 @@ static void MX_TIM16_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM7_Init(void);
 /* USER CODE BEGIN PFP */
-static void send_audio_sample(uint8_t uart_output);
+static void transmit_8bit_audio(uint8_t uart_output);
 void delay_uS(uint16_t delay);
 void ultrasonic_trig();
 static void handle_uart_command(void);
+
+static void reset_audio_filter_state(void);
 
 /* USER CODE END PFP */
 
@@ -144,10 +152,10 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM7_Init();
   /* USER CODE BEGIN 2 */
-  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+//  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
   HAL_TIM_Base_Start(&htim16);					// timer for counting us delay (note: place base_start above IT)
-  HAL_TIM_Base_Start_IT(&htim7);				// Timer to periodically enable ultrasonic sensor
-  HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);	// Echo input capture interrupt/ timer to measure distance
+//  HAL_TIM_Base_Start_IT(&htim7);				// Timer to periodically enable ultrasonic sensor
+//  HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);	// Echo input capture interrupt/ timer to measure distance
   __HAL_SPI_ENABLE(&hspi1);						// audio SPI receive pollign
 
   /* USER CODE END 2 */
@@ -163,10 +171,9 @@ int main(void)
 
 	  if (mode == MODE_MANUAL)
 	  {
-		  recording_enabler = 1;
+		  recording_enabler = 1;		// transmit
 	  }
-
-	  send_audio_sample(recording_enabler);
+	  transmit_8bit_audio(recording_enabler);		// transmit when enabled
   }
   /* USER CODE END 3 */
 }
@@ -469,8 +476,10 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+//uses tim16
 void delay_uS(uint16_t delay)
 {
+	// function to delay in microseconds
     __HAL_TIM_SET_COUNTER(&htim16 , 0);
     while (__HAL_TIM_GET_COUNTER(&htim16) < delay)
     {
@@ -480,50 +489,139 @@ void delay_uS(uint16_t delay)
 
 void ultrasonic_trig()
 {
+	// function to trigger ultrasonic sequence of Reset -> set -> reset
 	HAL_GPIO_WritePin(Trigger_GPIO_Port,Trigger_Pin, GPIO_PIN_RESET);
-	delay_uS(2);
+	delay_uS(2); //time for us sensor to completely reset
     HAL_GPIO_WritePin(Trigger_GPIO_Port,Trigger_Pin, GPIO_PIN_SET);
-    delay_uS(10);
+    delay_uS(10); //waits for 10us
     HAL_GPIO_WritePin(Trigger_GPIO_Port,Trigger_Pin, GPIO_PIN_RESET);
+}
+
+static void reset_audio_filter_state(void)
+{
+	// Simple function to reset variable values after switching between modes (flushes old data out when doing new recording)
+    prev_sample = 512;
+    prev_sample2 = 512;
+    filtered_sample = 512;
+    sample_toggle = 0;
+    output_val = 0;
+    downsam_sum = 0;
+    downsam_count = 0;
 }
 
 static void handle_uart_command(void)
 {
-    static uint8_t reading_distance = 0;
-    static uint16_t pending_distance = 0;
+	// This function is used to read commands from Python.
+	// It switches between modes such as IDLE , MANUAL , DISTANCE
+	// it should read values of 'I' , 'D' , 'M' and the distance threshold sent
+    static uint8_t reading_distance = 0;		// used for 'D', 1 = start reading digit , 0 = idle
+    static uint16_t pending_distance = 0;		// 1 = start reading digit , 0 = idle
+    // e.g if 10 is typed on CMD -> 1 is transmitted then only 0 is transmitted, so it has to save the first byte (1) then append 0 to the back to get 10
 
+    // reads 1 byte at a time from USART2; 0 means non-blocking -> no byte available. immediately exits to prevent bottlenecking transmissionr ate
     while (HAL_UART_Receive(&huart2, &rx_cmd, 1, 0) == HAL_OK)
     {
-        if (rx_cmd == 'M')
+    	// if mode is in IDLE mode
+        if (rx_cmd == 'I')
         {
-            mode = MODE_MANUAL;
-            mode_distance = 0;
-            recording_enabler = 1;
+        	// IDLE mode must ensure audio is NOT being sent to Python
+        	// keep spi audio draining in the background
+            mode = MODE_IDLE;
+            mode_distance = 0;			// Disable distance mode
+            recording_enabler = 0;		// stop audio being transmitted
 
+            reset_audio_filter_state();		// reset memory
+
+        	// Reset old distance readings
             reading_distance = 0;
             pending_distance = 0;
+
+            // stop ultrasonic timers
+            HAL_TIM_Base_Stop_IT(&htim7);
+            HAL_TIM_IC_Stop_IT(&htim1, TIM_CHANNEL_1);
+
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
+                                           TIM_CHANNEL_1,
+                                           TIM_INPUTCHANNELPOLARITY_RISING);
+            flag = 0;
+            distance = 999;			// 999 is used as "Too Far away value"
+            distance_valid = 0;
         }
+        // IF mode is in Manual mode
+        else if (rx_cmd == 'M')
+        {
+            mode = MODE_MANUAL;
+            // bypass ultrasonic sensor
+            mode_distance = 0; //does not trigger distance mode
+            // straight away enable the recording and transmitting
+            recording_enabler = 1;
+            reset_audio_filter_state();
+            reading_distance = 0;
+            pending_distance = 0;
+
+            // stop ultrasonic timers
+            HAL_TIM_Base_Stop_IT(&htim7);
+            HAL_TIM_IC_Stop_IT(&htim1, TIM_CHANNEL_1);
+
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
+                                           TIM_CHANNEL_1,
+                                           TIM_INPUTCHANNELPOLARITY_RISING);
+            flag = 0;
+            distance = 999;
+        }
+        // if mode is in Distance mode
         else if (rx_cmd == 'D')
         {
-            mode = MODE_DISTANCE;
-            mode_distance = 1;
+            /*
+             * Do not immediately start distance mode. This is to prevent premature audio sampling.
+             * Wait until Python sends the distance threshold.
+             */
+        	// temporary idel mode
+            mode = MODE_IDLE;
+            mode_distance = 0;
             recording_enabler = 0;
 
-            reading_distance = 1;
+
+            reading_distance = 1;		// start reading distance number
             pending_distance = 0;
+
+            HAL_TIM_Base_Stop_IT(&htim7);
+            HAL_TIM_IC_Stop_IT(&htim1, TIM_CHANNEL_1);
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
+                                           TIM_CHANNEL_1,
+                                           TIM_INPUTCHANNELPOLARITY_RISING);
+            flag = 0;
+            distance = 999;
         }
         else if (reading_distance)
         {
-            if (rx_cmd >= '0' && rx_cmd <= '9')
+        	// builts the minimum distance sent through python
+            if (rx_cmd >= '0' && rx_cmd <= '9') //command received from python
             {
+            	// converts ASCII characters to integer numbers
                 pending_distance = pending_distance * 10 + (rx_cmd - '0');
             }
-            else if (rx_cmd == '\n' || rx_cmd == '\r')
+            else if (rx_cmd == '\n' || rx_cmd == '\r')	// when newline is received, the distance number is finished
             {
                 if (pending_distance > 0 && pending_distance < 400)
                 {
                     min_distance_cm = pending_distance;
                 }
+                // enables distance mode logic
+                mode = MODE_DISTANCE;
+                mode_distance = 1;
+                recording_enabler = 0;
+
+                flag = 0;
+                distance = 999;
+
+                // reset timers
+                __HAL_TIM_SET_COUNTER(&htim1, 0);
+                __HAL_TIM_SET_COUNTER(&htim7, 0);
+
+                // start ultrasonic timers
+                HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);		// tim1 measures ultrasonic echo pulse
+                HAL_TIM_Base_Start_IT(&htim7);					// tim7 periodically triggers the ultrasonic sensor, instead of always turning it on
 
                 reading_distance = 0;
                 pending_distance = 0;
@@ -531,30 +629,35 @@ static void handle_uart_command(void)
         }
     }
 }
-
+//to trigger us sensor
+//uses tim7
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM7)
     {
         if (mode_distance)
         {
-            // runs every 100 ms
-        	ultrasonic_trig();
-
-            if (distance > 1 && distance < min_distance_cm)
+            if (distance > 1 && distance < min_distance_cm && distance_valid)
             {
                 recording_enabler = 1;
-                HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
+                // set Green light ON when minimum distance is reached
+                HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
             }
             else
             {
                 recording_enabler = 0;
-                HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
+                // set Green light OFF when minimum distance is reached
+                HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
             }
+            distance_valid = 0;
+            // runs every 100 ms, start next ultraspnic measurement at the end
+        	ultrasonic_trig();
+
         }
     }
 }
 
+//measures pulse width: to calculate distance of us sensor
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
     if ((htim->Instance == TIM1) &&
@@ -564,12 +667,11 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         if (flag == 0)
         {
             count1 = HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_1);
-            flag = 1;
 
-            // Next capture should be falling edge
             __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
                                            TIM_CHANNEL_1,
                                            TIM_INPUTCHANNELPOLARITY_FALLING);
+            flag = 1;
         }
         else
         {
@@ -587,86 +689,77 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
             }
 
             distance = pulse_width / 58.0f;
-
-            flag = 0;
-
-            // Return to rising edge for next measurement
+            distance_valid = 1;
             __HAL_TIM_SET_CAPTUREPOLARITY(&htim1,
                                            TIM_CHANNEL_1,
                                            TIM_INPUTCHANNELPOLARITY_RISING);
+            flag = 0;
         }
     }
 }
 
-static void send_audio_sample(uint8_t uart_output)
+static void transmit_8bit_audio(uint8_t uart_output)
 {
-    /*
-     * RXNE = Receive buffer not empty.
-     * If no SPI sample has arrived, return immediately.
-     */
+    // RXNE = Receive buffer not empty.
+    // If no SPI sample has arrived, return immediately, instead of computing
     if (__HAL_SPI_GET_FLAG(&hspi1, SPI_FLAG_RXNE) == RESET)
     {
         return;
     }
 
-    /*
-     * Read one 16-bit SPI frame from the SPI data register.
-     * Only the lower 10 bits are useful ADC data.
-     */
+    // Read one 16-bit SPI frame from the SPI data register.
+    // Only the lower 10 bits are useful ADC data.
     uint16_t raw_sample = (uint16_t)(hspi1.Instance->DR);
     raw_sample &= 0x03FF;			// use AND operand to extract the first 10 bits out of the 16 bits since adc value is 10-bit
 
-    /*
-     * Clear overrun if it happened.
-     * This prevents SPI from getting stuck after missed samples.
-     */
+    // Clear overrun if it happened.
+    // This prevents SPI from getting stuck after missed samples.
     if (__HAL_SPI_GET_FLAG(&hspi1, SPI_FLAG_OVR) != RESET)
     {
         __HAL_SPI_CLEAR_OVRFLAG(&hspi1);
     }
 
-    /*
-     * Simple outlier rejection:
-     * If the new sample jumps too far from the previous accepted sample,
-     * replace it with the previous sample.
-     */
-    int16_t delta = (int16_t)raw_sample - (int16_t)previous_sample;
+    // Simple outlier rejection:
+    // If the new sample difference between the previous accepted sample is too much to the OUTLIER THRESHOLD we tuned,
+    // limit the jump instead of replacing the value.
 
-    if ((delta > OUTLIER_THRESHOLD) || (delta < -OUTLIER_THRESHOLD))
+    int16_t diff = (int16_t)raw_sample - (int16_t)prev_sample;
+
+    if (diff > OUTLIER_THRESHOLD)
     {
-        raw_sample = previous_sample;
+        raw_sample = prev_sample + OUTLIER_THRESHOLD; //uses previous sample + threshold
+    } else if (diff < -OUTLIER_THRESHOLD)
+    {
+    	raw_sample = prev_sample - OUTLIER_THRESHOLD;
     }
 
-    /*
-     * Optimised moving average filter of length 2:
-     * average current accepted sample with previous accepted sample.
-     */
-    filtered_sample = (raw_sample + previous_sample) >> 1;
+    //Optimised moving average filter of length 3:
+    // average current accepted sample with previous two accepted sample.
+    filtered_sample = (raw_sample + prev_sample + prev_sample2)/3;
 
-    /*
-     * Store current accepted sample for next comparison/filter.
-     */
-    previous_sample = raw_sample;
+    // shife sample history for next incoming sample
+    prev_sample2 = prev_sample;
+    prev_sample = raw_sample;
 
-    /*
-     * Downsample by 2.
-     * Sampling STM sends ~44.1 ksps.
-     * Processing STM sends every second processed sample → ~22.05 ksps.
-     */
-    sample_toggle = !sample_toggle;
+    // Sampling STM sends about 44.1 ksps. For Processing SMT to send about 22.05ksps
+    // Downsample by 2 to meet the requirement
+    // Using prac 4 week 7, Concept 2:
+    // Instead of Dropping first samples and only forwarding every second sample, half the information is thrown away.
+    // Use of SAMPLE AVERAGING
+    downsam_sum += filtered_sample;
+    downsam_count++;
 
-    if (sample_toggle && uart_output)
+    if (downsam_count >= 2)
     {
-        /*
-         * Convert 10-bit sample, 0–1023, to 8-bit sample, 0–255.
-         */
-        output_val = (uint8_t)(filtered_sample >> 2);
+    	uint16_t downsam_avg_val = downsam_sum >> 1;		// divide sum by 2
+    	downsam_sum = 0;
+    	downsam_count = 0;
 
-        /*
-         * Send one byte to Python.
-         * USART2 should be 921600 baud for Task 3 headroom.
-         */
-        HAL_UART_Transmit(&huart2, &output_val, 1, 1);
+    	if (uart_output)
+    	{
+    		output_val = (uint8_t)(downsam_avg_val >> 2);		// shift by 2 bits to the right to remove 2 LSB(most right bits)
+    		HAL_UART_Transmit(&huart2, &output_val, 1, 1);
+    	}
     }
 }
 

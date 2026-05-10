@@ -1,8 +1,8 @@
 import csv
 import threading
 import wave
+import time
 from datetime import datetime
-
 import matplotlib.pyplot as plt
 import numpy as np
 import serial
@@ -115,19 +115,31 @@ def save_outputs(data, mode_name):
 def manual_recording_mode(ser):
     """
     Manual mode:
-    Python sends 'M' to Processing STM.
-    User enters duration.
+    Python asks for duration first.
+    Then sends 'I' to stop STM audio output and clear old bytes.
+    Then sends 'M' to start manual recording.
     Python reads SAMPLE_RATE * duration audio bytes.
     """
-    ser.reset_input_buffer()
-    ser.reset_output_buffer()
-
-    ser.write(b"M")
-
+    # Ask duration BEFORE starting STM manual stream
     duration = int(input("Enter recording duration in seconds: "))
     total_samples = SAMPLE_RATE * duration
 
     data = bytearray()
+
+    # Force STM into idle first so it stops sending old audio
+    ser.write(b"I")
+    time.sleep(0.15)
+
+    # Clear any old audio already sitting in the PC serial buffer
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+
+    # Now start STM manual recording
+    ser.write(b"M")
+    time.sleep(0.15)
+
+    # Clear transition bytes after mode switch
+    ser.reset_input_buffer()
 
     print("\nManual Recording Mode")
     print(f"Recording {duration} seconds at {SAMPLE_RATE} samples/second")
@@ -148,6 +160,12 @@ def manual_recording_mode(ser):
         print(f"\rReceived {len(data)}/{total_samples} samples ({progress:.1f}%)", end="")
 
     print("\nFinished manual recording.")
+
+    # Stop STM audio output immediately after recording
+    ser.write(b"I")
+    time.sleep(0.15)
+    ser.reset_input_buffer()
+
     return np.frombuffer(data, dtype=np.uint8)
 
 
@@ -159,6 +177,8 @@ def distance_recording_mode(ser):
     Processing STM controls when audio bytes are sent.
     Python records audio bytes until user types 'stop'.
     """
+    ser.write(b"I") # 'I' for Idle to stop STM audio output after recording
+    time.sleep(0.15)  # Short delay to ensure STM processes mode change
     ser.reset_input_buffer()
     ser.reset_output_buffer()
 
@@ -166,6 +186,9 @@ def distance_recording_mode(ser):
 
     distance = int(input("Enter trigger distance in cm: "))
     ser.write(f"{distance}\n".encode())
+
+    time.sleep(0.15)  # Short delay to ensure STM processes distance command
+    ser.reset_input_buffer()  # Clear any mode change responses before recording starts
 
     print("\nDistance Trigger Mode activated.")
     print("STM will only transmit audio when object is within the trigger distance.")
@@ -193,7 +216,9 @@ def distance_recording_mode(ser):
     print("\nStopping distance recording.")
 
     # Return STM to manual mode after stopping distance mode.
-    ser.write(b"M")
+    ser.write(b"I") # 'I' for Idle
+    time.sleep(0.15)  # Short delay to ensure STM processes mode change
+    ser.reset_input_buffer()  # Clear any mode change responses
 
     return np.frombuffer(data, dtype=np.uint8)
 
